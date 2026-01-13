@@ -21,8 +21,16 @@ AGENT_SYSTEM_PROMPT = """
 Thought: [这里是你的思考过程和下一步计划]
 Action: [这里是你要调用的工具，格式为 function_name(arg_name="arg_value")]
 
+# 收集用户信息：
+当你没有足够的信息能回复用户的最终问题时，你必须在`Action:`字段后使用 `query(answer="...")` 来输出询问用户的问题。
+
 # 任务完成:
 当你收集到足够的信息，能够回答用户的最终问题时，你必须在`Action:`字段后使用 `finish(answer="...")` 来输出最终答案。
+
+# 反思机制：
+如果 Observation 中包含用户的不满意反馈，你必须在下一次 Thought 中首先分析为什么之前的推荐失败了，并在 Action 中体现出策略的改变。
+
+#注意事项：如果遇到网络问题不能查询天气，请礼貌地告知用户，并且继续推荐景点。
 
 请开始吧！
 """
@@ -38,7 +46,7 @@ class OpenAICompatibleClient:
         self.model = model
         self.client = OpenAI(api_key=api_key, base_url=base_url)
 
-    def generate(self, messages: list, system_prompt: str) -> str:
+    def generate(self, messages: list) -> str:
         """调用LLM API来生成回应。"""
         print("正在调用大语言模型...")
         try:
@@ -129,29 +137,44 @@ if __name__ == "__main__":
     # welcome message
     print("欢迎使用智能旅行助手！")
 
-    # initialize chat history
-
     # initialize user memory
     user_memory = {
         "preference": "喜欢历史文化景点",
         "budget": "中等预算",
         "history_rejections": [],  # 记录用户拒绝过的景点
     }
+    user_query = input("\n✨ 请输入您的旅行相关问题 :")
+    # initialize chat history
+    chat_history = [
+        {
+            "role": "system",
+            "content": AGENT_SYSTEM_PROMPT
+            + f"\n用户发旅行偏好是:{user_memory['preference']}",
+        },
+        {"role": "user", "content": user_query},
+    ]
+    # 开始标记
+    START_flag = False
+    # 记录不满意的次数
+    UNSATISFIED_flag = 0
     while True:
-        user_query = input("请输入您的旅行相关问题: ")
-        chat_history = [
-            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_query},
-        ]
-        if user_query.lower() in ["exit", "quit", "退出"]:
-            break
+        if START_flag:
+            user_query = input("\n✨ 请输入您的旅行相关问题 :")
+            # 记录观察结果
+            chat_history.append({"role": "user", "content": user_query})
+            if user_query.lower() in ["exit", "quit", "退出"]:
+                print("\n✨ 很高兴为您服务！")
+                break
+        else:
+            START_flag = True
+
         # interaction loop
-        for i in range(5):
+        for i in range(100):
             """
             运行的逻辑参考了给的代码模板，但是有改动，具体的逻辑如下：
             - 使用ChatPromptTemplate来定义prompt模板，使用list数据结构来实现聊天记录的存储，实现记录上下文功能
             - 调用LLM，这里我使用的是deepseek的API
-            - 解析Action并执行工具，这里沿用了datawhale给的代码模板，链接
+            - 解析Action并执行工具，这里沿用了datawhale给的代码模板
               - 执行工具获得结果
               -将工具的观察结果作为用户反馈存入历史记录
 
@@ -176,7 +199,7 @@ if __name__ == "__main__":
                 )
 
             # 调用LLM生成回应
-            response = llm.generate(messages, AGENT_SYSTEM_PROMPT)
+            response = llm.generate(messages)
             # 处理多余输出的thought-Action
             match = re.search(
                 r"(Thought:.*?Action:.*?)(?=\n\s*(?:Thought:|Action:|Observation:)|\Z)",
@@ -200,11 +223,46 @@ if __name__ == "__main__":
                 break
             action_str = action_match.group(1).strip()
 
+            # 询问用户环节
+            if action_str.startswith("query"):
+                final_answer = re.search(r'query\(answer="(.*)"\)', action_str).group(1)
+                print(f"\n✨ 智能助手: {final_answer}")
+                query_data = input("\n请您回答:")
+                chat_history.append(
+                    {"role": "user", "content": f"Observation: {query_data}"}
+                )
+                break
+
+            # 最终回答环节
             if action_str.startswith("finish"):
                 final_answer = re.search(r'finish\(answer="(.*)"\)', action_str).group(
                     1
                 )
-                print(f"任务完成，最终答案: {final_answer}")
+                print(f"\n✨ 智能助手回答: {final_answer}")
+                # 实现询问用户是否满意
+                feedback = input("\n您对这个建议还满意吗?(满意/不满意)")
+                if "不满意" in feedback:
+                    UNSATISFIED_flag += 1
+                    # 让用户说出原因
+                    reason = input("能告诉我不满意的具体原因吗？")
+                    # 更新长期记忆
+                    user_memory["preference"] += f"推荐时避开这些因素：{reason}"
+                    chat_history.append(
+                        {"role": "user", "content": f"Observation: {reason}"}
+                    )
+                    print(
+                        f"✨ 已记录您的偏好。下次我会注意，我将为您重新推荐一个景点，若要退出本次对话请回复exit、quit、退出三者其一"
+                    )
+                    if UNSATISFIED_flag >= 3:
+                        new_system_content = (
+                            AGENT_SYSTEM_PROMPT
+                            + "\n【重要反思】：用户已连续多次不满意！请彻底放弃之前的推荐思路，尝试更独特或更符合用户避雷要求的方案。"
+                        )
+                        if chat_history[0]["role"] == "system":
+                            chat_history[0]["content"] = new_system_content
+                else:
+                    print("✨😊 太棒了！很高兴能帮到您。")
+
                 break
 
             tool_name = re.search(r"(\w+)\(", action_str).group(1)
