@@ -1,8 +1,8 @@
 import json
 import os
 from typing import List, Dict, Any, Callable
-from tool.weather import get_weather, WEATHER_SCHEMA
-from tool.google_search import google_search, GOOGLE_SEARCH
+from weather import get_weather, WEATHER_SCHEMA
+from google_search import google_search, GOOGLE_SEARCH
 
 
 class ReactTools:
@@ -14,7 +14,7 @@ class ReactTools:
 
     def __init__(self) -> None:
         # 注册工具
-        self._tool_map: Dict[str, Callable] = {
+        self._tools_map: Dict[str, Callable] = {
             # FIXME:要注册新的函数注册即可
             "get_weather": get_weather,
             "google_search": google_search,
@@ -22,8 +22,26 @@ class ReactTools:
         # 用于生成prompt
         self.toolConfig = [WEATHER_SCHEMA, GOOGLE_SEARCH]
 
-    def get_available_tools(self) -> List[str]:
-        pass
+    def execute_tool(self, tool_name: str, **kwargs) -> str:
+        """统一的工具执行入口"""
+        if tool_name not in self._tools_map:
+            return f"错误：工具 {tool_name} 未定义。"
+        return self._tools_map[tool_name](**kwargs)
 
-    def get_tool_description(self, tool_name: str) -> str:
-        pass
+    def get_tool_descriptions(self) -> str:
+        """
+        将 toolConfig 转换为一段纯文本描述，
+        直接塞进 AGENT_SYSTEM_PROMPT 里。
+        """
+        descriptions = []
+        for tool in self.toolConfig:
+            desc = f"工具名: {tool['name_for_model']}\n描述: {tool['description_for_model']}\n参数: {tool['parameters']}"
+            descriptions.append(desc)
+        return "\n\n".join(descriptions)
+
+
+if __name__ == "__main__":
+    Tool = ReactTools()
+    print(Tool.get_tool_descriptions())
+    print(Tool.execute_tool("get_weather", city="上海"))
+    print(Tool.execute_tool("google_search", search_query="Python编程语言的优缺点"))

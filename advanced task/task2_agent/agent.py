@@ -2,35 +2,39 @@ import json5
 import re
 import time
 import os
+import sys
+from dotenv import load_dotenv
 from llm import OpenAICompatibleClient
-from tool.tool import ReactTools
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(current_dir, "tool"))
+from tool.tool import *
 
 
 class ReactAgent:
-    def __init__(self, api_key: str = "") -> None:
+    def __init__(self, api_key: str = "", url: str = "") -> None:
         self.api_key = api_key
         self.tools = ReactTools()
         self.model = OpenAICompatibleClient(
             model="deepseek-chat",
-            api_key=os.getenv("DEEPSEEK_API_KEY"),
-            base_url="https://api.deepseek.com/v1",
+            api_key=api_key,
+            base_url=url,
         )
         self.system_prompt = self._build_system_prompt()
 
     def _build_system_prompt(self) -> str:
-        """构建系统提示，使用 ReAct 模式"""
-        tool_descriptions = []
+        """构建系统提示，直接从工具类获取描述"""
+        tool_info = []
         for tool in self.tools.toolConfig:
-            tool_descriptions.append(
-                f"{tool['name_for_model']}: {tool['description_for_model']}"
-                f" 参数: {json5.dumps(tool['parameters'], ensure_ascii=False)}"
+            tool_info.append(
+                f"- {tool['name_for_model']}: {tool['description_for_model']}"
             )
 
-        tool_names = [tool["name_for_model"] for tool in self.tools.toolConfig]
+        tool_names = list(self.tools._tools_map.keys())
 
-        prompt = f"""现在时间是 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}。你是一位智能助手，可以使用以下工具来回答问题：
+        prompt = f"""现在时间是 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}。你是一位智能助手，可以使用以下工具：
 
-{chr(10).join(tool_descriptions)}
+{chr(10).join(tool_info)}
 
 请遵循以下 ReAct 模式：
 
@@ -82,16 +86,18 @@ class ReactAgent:
 
     # TODO:这里要改成更加通用的形式
     def _execute_action(self, action: str, action_input: dict) -> str:
-        """执行指定的行动"""
-        if action == "google_search":
-            search_query = action_input.get("search_query", "")
-            if search_query:
-                results = self.tools.google_search(search_query)
-                return f"观察：搜索完成，结果如下：\n{results}"
-            else:
-                return "观察：缺少搜索查询参数"
+        """执行指定的行动，使用解耦后的 tools 管理器"""
+        # 检查工具是否存在于我们的注册表中
+        if action in self.tools._tools_map:
+            try:
+                # 动态调用工具函数并传入参数
+                # 使用 **action_input 将字典解包为命名参数
+                results = self.tools.execute_tool(action, **action_input)
+                return f"观察：{results}"
+            except Exception as e:
+                return f"观察：执行工具 {action} 时出错: {str(e)}"
 
-        return f"观察：未知行动 '{action}'"
+        return f"观察：未知行动 '{action}'，请尝试从已知工具列表中选择。"
 
     def _format_response(self, response_text: str) -> str:
         """格式化最终响应"""
@@ -107,8 +113,10 @@ class ReactAgent:
             max_iterations: 最大迭代次数
             verbose: 是否显示中间执行过程
         """
-        conversation_history = []
-        current_text = f"问题：{query}"
+        chat_history = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": f"问题：{query}"},
+        ]
 
         # 绿色ANSI颜色代码
         GREEN = "\033[92m"
@@ -122,20 +130,19 @@ class ReactAgent:
                 print(f"{GREEN}[ReAct Agent] 第 {iteration + 1} 次思考...{RESET}")
 
             # 获取模型响应
-            response, history = self.model.chat(
-                current_text, conversation_history, self.system_prompt
-            )
+            response = self.model.generate(chat_history)
 
             if verbose:
                 print(f"{GREEN}[ReAct Agent] 模型响应:\n{response}{RESET}")
 
+            chat_history.append({"role": "assistant", "content": response})
             # 解析行动
             action, action_input = self._parse_action(response, verbose=verbose)
 
-            if not action or action == "最终答案":
+            if not action or action == "最终答案" or "最终答案：" in response:
                 final_answer = self._format_response(response)
                 if verbose:
-                    print(f"{GREEN}[ReAct Agent] 无需进一步行动，返回最终答案{RESET}")
+                    print(f"{GREEN}[ReAct Agent] 任务完成{RESET}")
                 return final_answer
 
             if verbose:
@@ -150,8 +157,7 @@ class ReactAgent:
                 print(f"{GREEN}[ReAct Agent] 观察结果:\n{observation}{RESET}")
 
             # 更新当前文本以继续对话
-            current_text = f"{response}\n观察结果:{observation}\n"
-            conversation_history = history
+            chat_history.append({"role": "user", "content": observation})
 
         # 达到最大迭代次数，返回当前响应
         if verbose:
@@ -160,7 +166,10 @@ class ReactAgent:
 
 
 if __name__ == "__main__":
-    agent = ReactAgent(api_key="your api key")
+    load_dotenv()
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    url = "https://api.deepseek.com/v1"
+    agent = ReactAgent(api_key=api_key, url=url)
 
     response = agent.run(
         "美国最近一次阅兵的原因有哪些？", max_iterations=3, verbose=True
